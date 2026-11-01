@@ -184,10 +184,9 @@ def create_app(adapter: GraphRAGAdapter | None = None) -> FastAPI:
                 detail=f"adapter unavailable: {exc}",
             ) from exc
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "query failed",
                 extra={"trace_id": trace_id, "mode": payload.mode, "adapter": adapter_name},
-                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
