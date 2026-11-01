@@ -317,3 +317,20 @@ Versions utilisées :
 ## Licence
 MIT🔗 Modèle (adaptateurs LoRA) : https://huggingface.co/2Mohamed1/qa-multisaut-qlora
 🔗 Modèle entraîné (adaptateurs LoRA) : https://huggingface.co/2Mohamed1/qa-multisaut-qlora
+
+## Dataset doré gelé (P03) — golden_v1
+
+`eval/datasets/golden_v1.jsonl` : 56 lignes QA annotées graphe, construites depuis le corpus réel
+HotpotQA + KG (`scripts/build_golden_dataset.py`, seed 42). Distribution : 22 local (1 saut),
+16 hybrid (bridge, 2 docs), 9 global (comparatives), 9 abstention (absentes du KG).
+Chaque ligne : `{id, question, expected_answer, expected_entities, expected_triples, hops, mode, tags}` ;
+les réponses sont vérifiables sur les documents référencés dans `tags` (`doc:`/`docs:`).
+
+**Gel** : `eval/datasets/golden_v1.sha256` ; test pytest `tests/test_dataset_frozen.py` échoue si le
+JSONL est modifié sans dégel.
+
+```bash
+make validate-dataset          # schéma + unicité + distribution (56 lignes)
+make accept-dataset-change     # dégel conscient : régénère le sha256 (à committer avec le jsonl)
+```
+aucune ligne ne doit être modifiée après le commit de gel sans passer par `make accept-dataset-change`.

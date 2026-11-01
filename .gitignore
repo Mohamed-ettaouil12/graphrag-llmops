@@ -58,8 +58,10 @@ mlruns/
 # LLMOps (P01) — contenu expérimental non versionné,
 # seule l'arborescence (.gitkeep) est suivie.
 # NB : reports/j*.md legacy déjà trackés restent trackés (gitignore ne les détache pas).
+# P03 : eval/datasets est explicitement suivi (dataset doré gelé + sha256).
 eval/*
 !eval/.gitkeep
+!eval/datasets
 ops/*
 !ops/.gitkeep
 prompts/*
