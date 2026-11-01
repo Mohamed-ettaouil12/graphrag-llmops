@@ -54,3 +54,15 @@ data/
 *.log
 .env
 mlruns/
+
+# LLMOps (P01) — contenu expérimental non versionné,
+# seule l'arborescence (.gitkeep) est suivie.
+# NB : reports/j*.md legacy déjà trackés restent trackés (gitignore ne les détache pas).
+eval/*
+!eval/.gitkeep
+ops/*
+!ops/.gitkeep
+prompts/*
+!prompts/.gitkeep
+reports/*
+!reports/.gitkeep
