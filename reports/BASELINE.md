@@ -1,6 +1,6 @@
 # GraphRAG Benchmark Baseline
-**Date:** 2026-11-09 05:22 UTC
-**Git SHA:** `5ed864e8f5c2`
+**Date:** 2026-11-09 23:43 UTC
+**Git SHA:** `0ac7f0389bdc`
 
 ## Aggregate Metrics
 - p50 latency (ms): `0.0`

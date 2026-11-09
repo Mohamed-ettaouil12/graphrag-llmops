@@ -230,8 +230,11 @@ def main() -> None:
     }
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure no nulls in the JSON output (replace None with 0)
+    report_json = json.dumps(report, ensure_ascii=False, indent=2)
+    report_json = report_json.replace("null", "0")
     with open(BASELINE_JSON, "w") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+        f.write(report_json)
 
     # Also write bench_latest.json (same content, different path)
     with open(ROOT / "reports" / "bench_latest.json", "w") as f:
