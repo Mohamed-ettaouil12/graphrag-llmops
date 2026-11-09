@@ -3,7 +3,7 @@
 
 PY ?= .venv/bin/python
 
-.PHONY: install test lint eval bench validate-dataset accept-dataset-change
+.PHONY: install test lint eval eval-legacy bench compare validate-dataset accept-dataset-change
 
 install:
 	$(PY) -m pip install -q -r requirements.txt
@@ -15,15 +15,56 @@ test:
 # Lint scoping : nouveaux fichiers uniquement.
 # tests/test_api.py est legacy (P01 read-only) : exclu du lint.
 lint:
-	$(PY) -m ruff check llmops/ app/ tests/ --exclude tests/test_api.py scripts/build_golden_dataset.py scripts/validate_dataset.py
+	$(PY) -m ruff check llmops/ app/ eval/run_ragas.py tests/ --exclude tests/test_api.py scripts/build_golden_dataset.py scripts/validate_dataset.py
 
-# Évaluation pipeline (GPU + checkpoints + data/processed requis)
-eval:
+# Évaluation pipeline legacy (GPU + checkpoints + data/processed requis)
+eval-legacy:
 	PYTHONPATH=. $(PY) -m src.eval.run_evaluation --config C5 --split val
 
-# Bench latence sur 3 questions (GPU + checkpoints requis)
+# P04 — éval RAGAS reproductible (2 étapes, envs isolés, docs/audit_graphrag.md G11) :
+#   collect : venv repo  (.venv, torch)  -> reports/stages/contexts_latest.json
+#   judge   : venv eval  (ragas 0.1.21, litellm + MISTRAL_API_KEY) -> reports/eval_*.json
+EVAL_PY = eval/.venv/bin/python
+
+eval-bootstrap:
+	bash eval/bootstrap.sh
+
+eval: eval-bootstrap
+	PYTHONPATH=. $(PY) eval/run_ragas.py collect
+	PYTHONPATH=. $(EVAL_PY) eval/run_ragas.py judge
+
+# Variante sans GPU / sans clé Mistral (n'importe quelle machine) :
+# adapter _FakeAdapter + métriques RAGAS nulles (--no-judge), sortie 0 attendue.
+eval-smoke: eval-bootstrap
+	PYTHONPATH=. $(PY) eval/run_ragas.py collect --adapter fake --limit 6
+	PYTHONPATH=. $(EVAL_PY) eval/run_ragas.py judge --no-judge
+
+# Benchmark du dataset frozen (P05) :
+# - `make bench` : exécute eval si le dernier rapport a plus de 24h,
+#   puis lance scripts/bench.py pour réplayer le dataset et écrire
+#   reports/baseline.json + reports/BASELINE.md
+# - `make compare` : affiche side-by-side baseline vs bench_latest.json
 bench:
-	$(PY) scripts/demo.py
+	@bash eval/bootstrap.sh 2>/dev/null || true
+	PYTHONPATH=. $(PY) scripts/bench.py
+
+# Compare baseline vs latest bench
+compare:
+	@echo "=== Baseline vs Latest Bench ==="
+	@echo ""
+	@if [ -f reports/baseline.json ]; then \
+		echo "--- Baseline ---"; \
+		python3 -c "import json; d=json.load(open('reports/baseline.json')); m=d['metrics']; print(f'p50: {m[\"p50_latency_ms\"]}ms, p95: {m[\"p95_latency_ms\"]}ms, entity_recall: {m[\"entity_recall\"]}, faithfulness: N/A'); "; \
+	else \
+		echo "No baseline.json found — run 'make bench' first"; \
+	fi
+	@if [ -f reports/bench_latest.json ]; then \
+		echo "--- Latest Bench ---"; \
+		python3 -c "import json; d=json.load(open('reports/bench_latest.json')); m=d['metrics']; print(f'p50: {m[\"p50_latency_ms\"]}ms, p95: {m[\"p95_latency_ms\"]}ms, entity_recall: {m[\"entity_recall\"]}, faithfulness: N/A'); "; \
+	else \
+		echo "No bench_latest.json found — run 'make bench' first"; \
+	fi
+	@echo ""
 
 # P03 — dataset doré gelé (eval/datasets/golden_v1.jsonl + .sha256)
 validate-dataset:

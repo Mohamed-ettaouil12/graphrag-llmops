@@ -59,8 +59,15 @@ mlruns/
 # seule l'arborescence (.gitkeep) est suivie.
 # NB : reports/j*.md legacy déjà trackés restent trackés (gitignore ne les détache pas).
 # P03 : eval/datasets est explicitement suivi (dataset doré gelé + sha256).
+# P04 : le code eval est suivi (runner RAGAS + bootstrap du venv juge).
+# eval/.venv reste ignoré (74 paquets, ~200 Mo, recreable via eval/bootstrap.sh).
+# P04 : le code eval est suivi (runner RAGAS + bootstrap du venv juge).
+# eval/.venv reste ignoré (74 paquets, ~200 Mo, recreable via eval/bootstrap.sh).
 eval/*
 !eval/.gitkeep
+!eval/run_ragas.py
+!eval/bootstrap.sh
+!eval/requirements-judge.freeze.txt
 !eval/datasets
 ops/*
 !ops/.gitkeep

@@ -1,0 +1,14 @@
+{
+  "dataset_rows": 56,
+  "adapter": "FakeAdapter",
+  "metrics": {
+    "p50_latency_ms": 0.0,
+    "p95_latency_ms": 0.0,
+    "avg_tokens_in": 0,
+    "avg_tokens_out": 0,
+    "avg_cost_per_request_usd": 0.0,
+    "error_rate_pct": 0.0,
+    "entity_recall": 0.0426
+  },
+  "generated_at": "2026-11-09T05:22:16.303479+00:00"
+}
