@@ -10,7 +10,7 @@ install:
 	$(PY) -m pip install -q pytest ruff
 
 test:
-	$(PY) -m pytest tests/ -v
+	$(PY) -m pytest tests/ -v --cov=llmops --cov=eval --cov=ops --cov-fail-under=70
 
 # Lint scoping : nouveaux fichiers uniquement.
 # tests/test_api.py est legacy (P01 read-only) : exclu du lint.
@@ -75,3 +75,21 @@ validate-dataset:
 accept-dataset-change:
 	$(PY) scripts/validate_dataset.py --update-hash
 	@echo "golden_v1.sha256 régénéré — committer eval/datasets/golden_v1.jsonl et .sha256 ensemble"
+
+# Promouvoir une amélioration validée vers la nouvelle baseline.
+# Usage: make update-baseline
+# - Exécute `make bench` pour générer les nouveaux métriques (baseline.json + BASELINE.md)
+# - L'utilisateur examine les rapports, puis commit avec un message signé :
+#     git add reports/ baseline.json BASELINE.md
+#     git commit -m "chore(bench): promote baseline after improvement — <short description>"
+#     git tag -a baseline-$(shell git rev-parse --short HEAD) -m "New baseline"
+update-baseline:
+	@bash eval/bootstrap.sh 2>/dev/null || true
+	$(PY) scripts/bench.py
+	@echo ""
+	@echo "=== NEW BASELINE GENERATED ==="
+	@echo "Please review reports/baseline.json and reports/BASELINE.md"
+	@echo "When satisfied, commit with:"
+	@echo "  git add reports/ baseline.json BASELINE.md"
+	@echo "  git commit -m 'chore(bench): promote baseline after improvement — <description>'"
+	@echo "  git tag -a baseline-$(shell git rev-parse --short HEAD) -m 'New baseline'"

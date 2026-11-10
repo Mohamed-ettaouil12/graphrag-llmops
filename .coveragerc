@@ -1,0 +1,18 @@
+# Coverage configuration for LLMOps layer
+# https://coverage.readthedocs.io/
+
+[run]
+# Include these packages/directories
+source =
+    llmops,
+    eval,
+    ops,
+
+# Exclude the legacy pipeline and other non-essential files
+omit =
+    src/*,
+
+# Report by directory
+[report]
+# Show per-module percentages
+show_missing=True

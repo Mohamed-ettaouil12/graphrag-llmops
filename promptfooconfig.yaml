@@ -1,0 +1,80 @@
+# promptfooconfig.yaml — LLMOps evaluation configuration
+# The provider script calls the local ExistingGraphRAGAdapter; no remote LLM
+# calls are made during smoke testing. Deterministic 10-row subset.
+
+providers:
+  - name: local_graphrag
+    # Calls the local adapter script that wraps ExistingGraphRAGAdapter
+    # environment variable MISTRAL_API_KEY is optional (only needed for
+    # judge/model-grade steps, not for the local adapter itself).
+    # The provider function is `provider()` in scripts/promptfoo_provider.py.
+    # promptfoo invokes: `python -c "from scripts.promptfoo_provider import provider; print(provider())"`
+    # or imports the module directly.
+    # If MISTRAL_API_KEY is set, the provider may use it for model-graded
+    # factuality; otherwise it falls back to deterministic answers.
+    litellm:
+      model: auto/# resolved at runtime by the provider script
+      # temperature: 0 (deterministic)
+
+evals:
+  - name: graphrag-smoke
+    # 10-row deterministic smoke subset from golden_v1.jsonl (first 10 ids)
+    prompts:
+      # promptfoo will call provider() and iterate over the returned items.
+      # Each item becomes a prompt/question for the model-under-test.
+      - "{{ provider() }}"
+
+    # -------------------------------------------------------------------------
+    # Assertions — these are checked after each run
+    # -------------------------------------------------------------------------
+
+    # 1. Citation-format regex: every answer that contains "Sources:" must
+    #    have well-formed bracket references [1], [2], etc.
+    - assert:
+        assert_type: regex
+        assert_pattern: "^(.*\n)*\[(\d+)%\s.*$"
+        # The answer must match a pattern that includes citations like [1], [2]
+        # This ensures the prompt building (build_prompt_from_triplets) format
+        # is preserved.
+        message: "Answer must contain citation format [n] for each source"
+
+    # 2. Abstention rule: rows tagged (or expected) as abstention must
+    #    produce answer "Information insuffisante" or an abstention marker.
+    #    We check this by examining the expected_entities and expected_answer.
+    #    If expected_entities is empty or the question triggers abstention,
+    #    the answer must not contain a false positive.
+    - assert:
+        assert_type: custom
+        # This will be executed as a Python assertion in the CI context.
+        # The provider returns `expected_entities` and `expected_answer` per row.
+        # We assert: if expected_entities is empty → answer must contain
+        # "absente" or "insuffisante".
+        assertion: |
+          import re
+          for row in rows:
+              q = row["question"]
+              a = row["answer"]
+              # Deterministic check: if the question contains "uncertain" or
+              # expected_entities is empty, abstention is required.
+              if not row.get("expected_entities") or "uncertain" in q.lower():
+                  assert "absente" in a.lower() or "insuffisante" in a.lower(), \
+                      f"Abstention expected for Q={q!r} but got answer={a!r}"
+        message: "Abstention rows must produce 'Information insuffisante' or 'absente'"
+
+    # 3. Model-graded factuality threshold:
+    #    The provider may use MISTRAL_API_KEY to call mistral-small as a
+    #    judge. If the key is absent, this assertion is skipped (graceful).
+    - assert:
+        assert_type: factuality
+        # threshold: 0.5 means at least 50% of rows must have a judge
+        # verdict of "supported" or "partially supported"
+        threshold: 0.5
+        message: "Model-graded factuality below threshold 0.5 (relative to baseline)"
+
+    # -------------------------------------------------------------------------
+    # Nightly-full differs from this smoke run; see eval-gate.yml for CI.
+    # -------------------------------------------------------------------------
+
+artifact_paths:
+  - reports/baseline.json
+  - reports/BASELINE.md
