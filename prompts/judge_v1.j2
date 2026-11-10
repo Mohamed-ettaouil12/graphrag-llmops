@@ -1,0 +1,25 @@
+# Judge Prompt v1 — LLM-as-judge for GraphRAG trace grading
+# Version: v1 (P14 convention: versioned prompts are tracked in prompts/.)
+# Do NOT call this prompt from within the query path; it is deferred.
+# The judge model (mistral-large) must NOT call itself (no recursion).
+# Cost is bounded: each judge call is capped at ~512 tokens → ~$0.005 per call.
+
+{{evidence}}
+
+Instructions:
+Grade the [answer] using the [question] and the evidence below. Assign a score for each criterion on a scale of 0 to 5 (inclusive), and provide a brief reason.
+
+- **faithfulness**: How well does the answer follow from the evidence (triplets, retrieved text)? 0 = answer is unrelated to evidence; 5 = answer is directly and fully supported.
+- **groundedness**: How grounded is the answer in factual reality? 0 = answer contains hallucinations/fabricated facts; 5 = answer is factually correct and verifiable.
+
+Output must be strict JSON with this exact schema (no prose, no markdown code fences):
+
+{
+  "faithfulness": <0-5>,
+  "groundedness": <0-5>,
+  "reason": "<short explanation, max 1 sentence>"
+}
+
+Question: {{question}}
+Answer: {{answer}}
+Evidence: {{evidence}}

@@ -1,0 +1,74 @@
+name: Daily Observability Alert
+
+on:
+  schedule:
+    # Run every day at 01:00 UTC
+    - cron: "0 1 * * *"
+  workflow_dispatch:  # allow manual runs
+
+jobs:
+  alert-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      # Optional: set a daily cost threshold (USD). If empty, cost alert is disabled.
+      DAILY_COST_USD_THR: "${DAILY_COST_USD_THRESHOLD:-}"
+      JUDGE_SAMPLE_RATE: "${JUDGE_SAMPLE_RATE:-0.1}"
+      JUDGE_FAITHFULNESS_THR: "${JUDGE_FAITHFULNESS_THRESHOLD:-3.5}"
+      LATENCY_P95_THR: "${LATENCY_P95_THRESHOLD:-1.5}"
+      ERROR_RATE_THR: "${ERROR_RATE_THRESHOLD:-2.0}"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q pytest ruff langfuse instructor
+          pip install -q -r requirements.txt
+
+      - name: Run alert check
+        id: alert
+        run: |
+          python ops/alert_check.py
+          # The script exits 1 if any threshold is crossed; we capture the
+          # exit code and output a GitHub annotation-friendly message.
+          exit_code=$?
+          if [ $exit_code -ne 0 ]; then
+            echo "alert_triggered=true" >> $GITHUB_OUTPUT
+            echo "::error ::Alert triggered – see reports/alerts.jsonl for details"
+          else
+            echo "alert_triggered=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload alerts artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alerts-jsonl
+          path: reports/alerts.jsonl
+          retention-days: 7
+
+      - name: Post comment on alert (optional webhook)
+        if: steps.alert.outputs.alert_triggered == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Post a comment on the workflow run summary
+          echo "### 🚨 Daily Observability Alert triggered" >> $GITHUB_STEP_SUMMARY
+          echo "- Average judge faithfulness: ${{ env.JUDGE_FAITHFULNESS_THR }}" >> $GITHUB_STEP_SUMMARY
+          echo "- p95 latency: > ${{ env.LATENCY_P95_THR }}s" >> $GITHUB_STEP_SUMMARY
+          echo "- Error rate: > ${{ env.ERROR_RATE_THR }}%" >> $GITHUB_STEP_SUMMARY
+          echo "See [reports/alerts.jsonl](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/reports/alerts.jsonl) for details."
