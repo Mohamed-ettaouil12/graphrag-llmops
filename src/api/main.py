@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from src.orchestrator.graph import create_pipeline, run_pipeline
 from src.orchestrator.state import PipelineConfig, PipelineState
+from llmops.adapter import ExistingGraphRAGAdapter, GraphAnswerMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,11 +18,14 @@ logger = logging.getLogger(__name__)
 pipeline = None
 pipeline_config = None
 
+# Langfuse instance (peut être désactivée si pas de clés)
+lf: ExistingGraphRAGAdapter = None  # reused as carrier of trace state
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - load model on startup."""
-    global pipeline, pipeline_config
+    global pipeline, pipeline_config, lf
     logger.info("Starting up... Loading pipeline...")
     
     pipeline_config = PipelineConfig()
@@ -31,6 +35,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to load pipeline: {e}")
         pipeline = None
+    
+    # Init Langfuse adapter (désactivé si pas de clés)
+    from llmops.adapter import _get_langfuse
+    lf = _get_langfuse()
     
     yield
     
@@ -70,6 +78,8 @@ class AskResponse(BaseModel):
     abstained: bool = False
     abstention_reason: str = ""
     format_ok: bool = True
+    trace_id: str = ""
+    session_id: str = "default"
 
 
 class HealthResponse(BaseModel):
@@ -80,7 +90,7 @@ class HealthResponse(BaseModel):
     config: dict
 
 
-def _state_to_response(state: PipelineState, latency_ms: float) -> AskResponse:
+def _state_to_response(state: PipelineState, latency_ms: float, trace_id: str, session_id: str) -> AskResponse:
     """Convert pipeline state to API response."""
     # Convert triplets to output format
     sources = []
@@ -104,6 +114,8 @@ def _state_to_response(state: PipelineState, latency_ms: float) -> AskResponse:
         abstained=state.abstained,
         abstention_reason=state.abstention_reason,
         format_ok=format_ok,
+        trace_id=trace_id,
+        session_id=session_id,
     )
 
 
@@ -130,12 +142,18 @@ async def ask(request: AskRequest):
     start = time.time()
     
     try:
-        # Run pipeline
-        result = run_pipeline(request.question.strip(), pipeline_config)
+        # Run pipeline via the adapter (instrumented)
+        adapter = ExistingGraphRAGAdapter(session_id="api-session")
+        result: GraphAnswer = adapter.query(request.question.strip(), "hybrid")
         
         latency_ms = (time.time() - start) * 1000
         
-        return _state_to_response(result, latency_ms)
+        return _state_to_response(
+            result.metadata,  # PipelineState has been merged into GraphAnswerMetadata
+            latency_ms,
+            trace_id=result.metadata.trace_id,
+            session_id=result.metadata.session_id,
+        )
     
     except Exception as e:
         logger.error(f"Pipeline error: {e}", exc_info=True)
