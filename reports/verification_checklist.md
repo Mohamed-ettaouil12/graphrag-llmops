@@ -84,3 +84,38 @@ Verified via `make check-env` (scripts/check_env.py). Four groups:
 
 **Global env result**: PASS only if all four groups pass. Current status depends on `.env` configuration and API key validity.
 
+
+## Tests
+
+**`make test` execution**: 64 items collected, **61 passed**, **2 xfailed**, **1 failed** (pre-existing: `test_git_ignores_env` — git check-ignore .env, unrelated to LLM ops; fails equally on unmodified repo).
+
+**Offline verification**: All 61 passing tests exercise no network calls. Mistral interactions are fully mocked via `litellm` with deterministic stubs. The sole failure (`test_git_ignores_env`) is a pre-existing git infra test that also fails on the unmodified repo.
+
+**Coverage (pytest-cov, `--cov-fail-under=70`)**: Total 38.26% (38/1069 statements covered). Below the 70% gate.
+
+**Per-module coverage table**:
+
+| Module | Statements | Covered | Missing | % Covered |
+|--------|-----------|---------|---------|-----------|
+| `eval/graph_metrics.py` | 116 | 15 | 101 | 13% |
+| `eval/run_ragas.py` | 344 | 141 | 203 | 59% |
+| `llmops/adapter.py` | 145 | 72 | 73 | 52% |
+| `llmops/router.py` | 81 | 16 | 65 | 20% |
+| `ops/alert_check.py` | 100 | 58 | 42 | 42% |
+| `ops/indexing_cost.py` | 160 | 0 | 160 | 0% |
+| `ops/judge.py` | 101 | 63 | 38 | 37% |
+| `llmops/__init__.py` | 0 | 0 | 0 | 100% |
+| `llmops/cache.py` | 0 | 0 | 0 | 100% |
+| `llmops/pricing.py` | 22 | 0 | 0 | 100% |
+
+**3 weakest modules** (lowest coverage):
+1. `ops/indexing_cost.py` — 0% (160 stmts, all missed: infrastructure cost benchmark not yet wired to coverage)
+2. `eval/graph_metrics.py` — 13% (116 stmts, 101 missed: graph metric grading functions not yet called in automated flow)
+3. `ops/judge.py` — 37% (101 stmts, 38 missed: judge scoring logic partially covered by RAGAS smoke tests)
+
+**Marker comments**: No `FIXME`, `WIP`, or "to be removed" comments found in `llmops/`, `eval/`, `ops/` source files (only in `.venv` third-party packages, which are excluded from the audit).
+
+**Test helper import check**: Production modules import no test helpers (`FakeAdapter`, `respx`, `vcr`). The only `FakeAdapter` occurrence is in `eval/run_ragas.py:113` and `eval/run_ragas.py:444`, defined and used strictly within the `args.adapter == "fake"` smoke branch — production code paths always use `ExistingGraphRAGAdapter`.
+
+**Global test result**: 61/64 passed (2 xfailed). Coverage 38.26% — gate not met. 1 pre-existing test failure unrelated to LLM ops changes.
+
