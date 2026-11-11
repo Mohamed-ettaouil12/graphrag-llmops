@@ -1,15 +1,14 @@
 """FastAPI application for QA multi-hop."""
-import time
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.orchestrator.graph import create_pipeline, run_pipeline
+from llmops.adapter import ExistingGraphRAGAdapter, GraphAnswer
+from src.orchestrator.graph import create_pipeline
 from src.orchestrator.state import PipelineConfig, PipelineState
-from llmops.adapter import ExistingGraphRAGAdapter, GraphAnswerMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,8 +31,8 @@ async def lifespan(app: FastAPI):
     try:
         pipeline = create_pipeline(pipeline_config)
         logger.info("Pipeline loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load pipeline: {e}")
+    except Exception:  # nosec BLE001 (startup degradation : failure non critique)
+        logger.exception("Failed to load pipeline")
         pipeline = None
     
     # Init Langfuse adapter (désactivé si pas de clés)
@@ -156,8 +155,8 @@ async def ask(request: AskRequest):
         )
     
     except Exception as e:
-        logger.error(f"Pipeline error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        logger.exception("Pipeline error")
+        raise HTTPException(status_code=500, detail=f"Internal error: {e!s}")
 
 
 @app.get("/")

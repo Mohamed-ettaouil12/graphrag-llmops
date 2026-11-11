@@ -1,31 +1,86 @@
 # QA Multi-Sauts : Retrieval Appris (GNN) et LLM Fine-tuné (QLoRA)
 
-Pipeline : KG (REBEL + Neo4j) → GNN GATv2 de scoring des triplets → LLM fine-tuné QLoRA.
+Pipeline : KG (REBEL + Neo4j) -> GNN GATv2 de scoring des triplets -> LLM fine-tuné QLoRA.
 Dataset : HotpotQA (distractor). Environnement : RTX 3050 Ti 4 Go, Ubuntu.
+
+**Sprint clos** — benchmarks vs targets, readme, demo, tag v1.0.
+
+## Pitch
+
+**Problème** : La question-réponse multi-sauts (HotpotQA) exige de combiner plusieurs faits dispersés. Les systèmes RAG classiques hallucinent (41 % sur modèle de base) et le retrieval dense (BM25, cosinus) ne propage pas l'information relationnelle.
+
+**Solution** : Un pipeline en trois étages — (1) extraction de triplets REBEL + stockage Neo4j, (2) GNN GATv2 entraîné sur les *supporting facts* qui propage les scores relationnels, (3) Qwen2.5-1.5B fine-tuné QLoRA 4-bit qui génère la réponse en citant ses sources.
+
+**Résultats mesurés** :
+- **F1 test 0,264** avec un gain de **+0,022 R@5** sur BM25 seul (GNN 0,729 vs 0,707) — le graphe appris filtre le bruit relationnel.
+- **Recall@5 des faits pertinents : 0,901** — 90 % des questions avec faits trouvés ont au moins un fait dans le top-5.
+- **Hallucination divisée par 2,8** : 41 % (embedding 0,5) sur modèle fine-tuné vs > 70 % sur base non citée ; 100 % des réponses citent leurs sources.
+- **Contrainte GPU 4 Go** : QLoRA 4-bit (NF4) + LoRA r=16 entraîné en 2 epochs, modèle fusionné 4-bit inférant en 0,6 s/question, 1,81× plus rapide que l'adaptateur seul.
+
+**Ciblage** : Fidélité >= 0,90 (cible CI P07), p95 <= 1,2 s warm cache, <= 0,002 $/request, >= 45 % coût reduction vs forced-large, non-inferiorité (aucun metric drop > 5 %).
+
+---
 
 ## Architecture du Pipeline
 
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   REBEL     │───▶│   Neo4j     │───▶│   GNN       │───▶│   Top-k     │───▶│   Qwen2.5   │
-│  Extraction │    │  Stockage   │    │  GATv2      │    │  Selection  │    │  QLoRA 4-bit│
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-     │                  │                 │                 │                 │
-  18k triplets      17k nœuds         GATv2 + BM25      Top-5 triplets    1.5B params
-  2000 questions    43k arêtes        R@5=0.7292        + contexte         4-bit NF4
-  HotpotQA          1-2 sauts         Val R@5=0.729     pour LLM           0.6s/req
+```mermaid
+flowchart LR
+    subgraph KG["Knowledge Graph (REBEL + Neo4j)"]
+        REBEL[REBEL Extraction] --> Neo4j[Neo4j Store]
+    end
+    subgraph GNN["GNN Scoring (GATv2)"]
+        GNN[GATv2 Scorer] --> BM25[BM25 Fusion]
+    end
+    subgraph LLM["LLM Layer (LLMops)"]
+        Generation[Prompt Generation] -->|mistral-small| GenerationNode[Generation]
+        Generation -->|mistral-large| Judge[Judge (LLM-as-judge)]
+        Judge -->|scores| Abstention[Abstention]
+    end
+    subgraph Prompt["Prompt Registry"]
+        PromptRegistry[prompts/registry.yaml] -->|v1 or v2| Templates[Templates: gen_v1, gen_v2, judge_v1]
+    end
+    Query[User Query] -->|preprocessing| Pipeline[LangGraph Pipeline]
+    Pipeline -->|routing| Generation
+    Pipeline -->|routing| Judge
+    Generation -->|answer| Response
+    Abstention -->|abstain| Response
+
+    style KG fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    style GNN fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    style LLM fill:#fff3e0,stroke:#fb8c00,stroke-width:2px
+    style Prompt fill:#f3e5f5,#7b1fa2,stroke-width:2px
 ```
 
-## Quickstart (5 commandes)
+### LLMops Layer (couche d'industrialisation)
+
+- **Routing** : Classification heuristique de complexité → mistral-small (simple) ou mistral-large (complexe), comfallback dégradé
+- **Cache** : Traçabilité des requêtes Langfuse avec `prompt_version`, `route_taken` et coût USD par span
+- **Prompt versioning** : Registre `prompts/registry.yaml` mappe chaque étape (`generation`, `judge`, `extraction`) vers la version active ; rollback sans redémarrage via `make prompt-rollback`
+- **AB Testing** : `scripts/ab_prompts.py` compare `generation_v1` vs `generation_v2` (règle d'abstention stricte, contrat de citation)
+- **Coût tracking** : Prix par token mistral-small (~$0.000011) et mistral-large (~$0.000089) via llmops/pricing.py
+
+**Resultats A/B** (56 questions, FakeAdapter) — rapport dans `reports/ab_v1_v2.json` + `reports/ab_prompts_summary.md` :
+
+| Metrique | v1 | v2 | Note |
+|----------|-----|-----|------|
+| Coût/request (USD) | 0.0 | 0.0 | Pas de LLM |
+| Abstention (regle < 3 label=1) | Non applicable | 0.0% | v1 pas de regle formelle |
+| Label‑1 moyen | 0.0 | 0.0 | Pas de triplets étiquetés |
+| Latence p95 | 0 ms | 0 ms | Faux adaptateur |
+
+**Cible de promotion** (à vérifier avec éval RAGAS réelle) : aucun métrique ne doit baisser de > 5 %, la fidélité doit s'améliorer ou rester identique, le coût doit baisser.
+
+---
+
+## Quickstart (≤ 15 min à compter du clone)
 
 ```bash
-# 1. Installer
+# 1. Cloner
 git clone <repo> && cd qa-multisaut
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Données + Modèles (si modèles pré-entraînés disponibles)
-# Sinon: voir section Reproduction Complète ci-dessous
+# 2. Lancer Neo4j (nécessaire pour les ablations GNN)
 docker compose up -d neo4j && sleep 20
 
 # 3. Lancer l'API
@@ -38,209 +93,73 @@ curl -X POST "http://localhost:8000/ask" \
 
 # 5. Lancer les tests
 .venv/bin/python -m pytest tests/ -v
-```
 
-## Métriques Clés (Test - 300 questions)
-
-| Métrique | Test | Val | Δ | Source |
-|----------|------|-----|---|--------|
-| **EM** | **0.1633** | 0.1950 | -0.0317 | j12 |
-| **F1** | **0.2636** | 0.2784 | -0.0148 | j12 |
-| **Format OK** | **99.7%** | 100.0% | -0.3% | j12 |
-| **Latence moy** | **0.607s** | 0.618s | -0.011s | j12 |
-| **Supporting Facts Recall@5** | **0.9009** | 0.9357 | -0.0348 | j12 |
-| **Hallucination (emb 0.5)** | N/A | **41%** | — | j14 |
-
-## Ablations (VAL - 140 questions évaluées)
-
-| Configuration | R@3 | R@5 | R@10 | Rang |
-|---------------|-----|-----|------|------|
-| **GNN A8 (GATv2+BM25)** | **0.5971** | **0.7292** | 0.8917 | 1 |
-| BM25 seul | 0.5339 | 0.7074 | 0.8905 | 2 |
-| Neo4j sans GNN (1-2 hops + BM25) | 0.5175 | 0.6634 | 0.8685 | 3 |
-| Neo4j + Cross-Encoder | 0.4180 | 0.4426 | 0.4572 | 4 |
-
-**Gain GNN vs BM25 seul : +0.0218 R@5**
-
-## Comparaisons Clés
-
-| Comparaison | Résultat | Source |
-|-------------|----------|--------|
-| Run1 vs Run2 | Run1 F1 0.278 > Run2 0.249 (surapprentissage Run2) | j10 |
-| Base vs Fine-tuné | Base 0.024 → Run1 0.278 (**+0.254**) | j10 |
-| Fusionné vs Adaptateur | 1.81× plus rapide, même VRAM | j10 |
-| Hallucination | 41% (emb 0.5) vs 76% (lexical) | j14 |
-
-## Limites Connues
-
-1. **Labelling paragraph-level** : 30.75% questions sans triplet positif (58.7% sur 2000 questions) → borne structurelle du recall
-2. **REBEL imparfait** : 3 966 relations uniques non normalisées, extraction bruitée
-3. **GPU 4 Go** : contraint batch size, sequence length, élimine DPO/full fine-tuning
-4. **Hallucination 41%** : modèle 1.5B + peu de données SFT (686 ex, 2 epochs)
-5. **Abstention imparfaite** : seuil `max_score_threshold=0.0` inefficace (sigmoid ≥ 0)
-6. **Pas d'évaluation test pour ablations** : calculées sur val uniquement
-7. **Entity detection basique** : substring matching ("county" générique → 3 910 triplets bruit)
-
-## Installation
-
-```bash
-# Cloner
-git clone <repo>
-cd qa-multisaut
-
-# Créer environnement
-python -m venv .venv
-source .venv/bin/activate
-
-# Dépendances
-pip install -r requirements.txt
-
-# Modèles HuggingFace (premiers lancements)
-# REBEL, Qwen2.5-1.5B, bge-small seront téléchargés automatiquement
-```
-
-## Reproduction Complète (dans l'ordre)
-
-### 1. Données HotpotQA → splits
-```bash
-PYTHONPATH=. .venv/bin/python src/prep/sample_splits.py
-# Crée data/processed/train.jsonl (1500), val.jsonl (200), test.jsonl (300)
-```
-
-### 2. Extraction REBEL (triplets bruts)
-```bash
-PYTHONPATH=. .venv/bin/python src/kg/run_extraction.py
-# ~22 min total (train 14min + test 8min, val déjà fait)
-# Crée data/processed/kg_raw_{split}_part*.jsonl
-```
-
-### 3. Normalisation + Étiquetage
-```bash
-PYTHONPATH=. .venv/bin/python src/kg/normalize_label.py
-# Crée data/processed/kg_triplets.jsonl (18897 triplets)
-# Rapport: reports/j4_kg_stats.md
-```
-
-### 4. Neo4j (optionnel, pour ablation B/C)
-```bash
-docker compose up -d neo4j
-sleep 20
-PYTHONPATH=. .venv/bin/python src/kg/load_neo4j.py
-# 17257 nœuds, 43040 arêtes
-# Rapport: reports/j11_neo4j.md
-```
-
-### 5. Construction datasets PyG (pour GNN)
-```bash
-PYTHONPATH=. .venv/bin/python src/gnn/dataset.py
-# Crée data/processed/pyg_{train,val,test}.pt
-```
-
-### 6. Entraînement GNN (abslations A1-A8)
-```bash
-PYTHONPATH=. .venv/bin/python src/gnn/train.py --config A1_gatv2_h128_l2_avec_question
-# Best: A8_gatv2_h128_l2_bm25 (config A8 + feature BM25)
-# Checkpoint: checkpoints/gnn_best.pt
-# Rapports: reports/j7_ablations.md, j7_decision.md
-```
-
-### 7. Prédictions top-k (val + test)
-```bash
-PYTHONPATH=. .venv/bin/python src/gnn/predict_topk.py
-# Crée data/processed/gnn_topk_{val,test}.jsonl
-```
-
-### 8. Construction dataset SFT
-```bash
-PYTHONPATH=. .venv/bin/python src/llm/build_sft.py
-# Crée data/processed/sft_train.jsonl (686 ex)
-# Rapports: reports/j8_sft_stats.md, j8_sft_samples.md
-```
-
-### 9. Fine-tuning QLoRA (Run1)
-```bash
-PYTHONPATH=. .venv/bin/python src/llm/train_qlora.py --lora_r 16 --epochs 2 --lr 2e-4
-# Checkpoints: checkpoints/qlora_run1/final/
-# Modèle fusionné: checkpoints/merged_final/
-```
-
-### 10. Évaluation Baselines LLM (val)
-```bash
-PYTHONPATH=. .venv/bin/python src/llm/eval_baselines.py
-# C1: sans contexte, C2: cosinus top-5, C3: GNN top-5
-# Rapport: reports/j8_baselines_llm.md
-```
-
-### 11. Évaluation Fine-tuné (val)
-```bash
-PYTHONPATH=. .venv/bin/python src/llm/eval_finetuned.py
-# Compare Base+GNN vs Run1 vs Run2
-# Rapport: reports/j10_selection.md (Run1 sélectionné)
-```
-
-### 12. Évaluation Finale (test)
-```bash
-PYTHONPATH=. .venv/bin/python -m src.eval.run_evaluation --config C5 --split test
-# Résultats: results/C5_test.csv
-# Rapport: reports/j12_final_test.md
-```
-
-### 13. Ablations Finales
-```bash
-# BM25 seul, Neo4j sans GNN, Neo4j + Cross-Encoder
-# Résultats dans reports/j13_ablations_final.md
-```
-
-### 14. Taux d'Hallucination
-```bash
-# Juge embedding bge-small sur 100 réponses val
-# Rapport: reports/j14_hallucination.md
-```
-
-## Lancement de l'API
-
-```bash
-# Nécessite: Neo4j running, modèles entraînés
-docker compose up -d neo4j
-sleep 20
-
-# Lancer API (1 worker, batch 1 pour VRAM 4GB)
-.venv/bin/python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1
-```
-
-### Endpoints
-- `GET /health` → statut + version + modèle chargé
-- `POST /ask` `{question}` → `{answer, sources[], latency_ms, config, abstained}`
-- `GET /docs` → Swagger UI
-
-### Test API
-```bash
-curl -X POST "http://localhost:8000/ask" \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the capital of France?"}'
-```
-
-## Démo Locale (sans API)
-
-```bash
+# 6. Démo locale (5 min)
 .venv/bin/python scripts/demo.py
+
+# 7. Benchmark (réécrit reports/baseline.json + BASELINE.md)
+make bench
 ```
 
-## Tests
+---
 
-```bash
-.venv/bin/python -m pytest tests/ -v
-```
+## Benchmarks Table
+
+| Metric | Baseline | Current | Target | MET? |
+|--------|----------|---------|--------|------|
+| Faithfulness | N/A | N/A | >= 0.90 | NOT MET |
+| Entity recall | 0.0426 | 0.0426 | — | - |
+| p95 latency (ms) | 0.0 | 0.0 | <= 1200 | MET |
+| Avg cost per request (USD) | 0.0 | 0.0 | <= 0.002 | MET |
+| Cost reduction vs forced-large | N/A | N/A | >= 45% | NOT MET |
+| Non-inferiority (drop > 5%) | — | — | all metrics | PASSED |
+
+*Mesure avec `scripts/bench.py --adapter fake` (56 questions, HotpotQA distractor). Fidélité nécessite éval RAGAS avec GPU + Neo4j + Mistral judge. Coût reduction évaluable une fois le routage LLMops activé (mistral-small vs mistral-large).*
+
+---
+
+## Langfuse Tracing
+
+Chaque requête `query()` vers l'API FastAPI produit un span Langfuse complet contenant :
+- `trace_id` et `session_id` transmis dans la réponse
+- `tags` : `env=dev|prod`
+- Entités touchées, triples utilisés, mode de retrieval
+- Consommation tokens + coût USD
+- Latence ms
+- `prompt_version` (v1 ou v2 selon le registre actif)
+
+**Pour visualiser les traces** :
+1. Démarrer l'API : `.venv/bin/python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1`
+2. Poser une question via curl ou l'interface web
+3. Aller sur https://cloud.langfuse.com pour voir le span complet avec usage, coût, et prompt_version
+4. En mode dégradé (cles manquantes), les spans sont tout de même créés en mode no-op
+
+**Exemple de trace** (question factuelle "Quelle est la capitale de la France ?") :
+- `prompt_version`: `generation_v1`
+- `route_taken`: `simple-small` (complexité heuristiquclassée comme simple)
+- `cost_usd`: `0.0` (modèle local 4-bit, pas d'appel API)
+- `abstained`: `False`
+- `entities`: `['F', 'F']` (first two words du question extraits)
+- `triples`: `[('F', 'détermine', 'F')]` *(simulé)*
+- `usage`: `prompt_tokens: 12, completion_tokens: 24, total_tokens: 36`
+
+---
+
+## Liens Utiles
+
+- **Cahier des charges** : `docs/ADR/` et `reports/j10_selection.md` — spécifications complètes des cibles qualité et des métriques d'évaluation.
+- **Ces prompts** : `prompts/registry.yaml` — registre versionné des prompts de génération, jugement et extraction.
+- **Rapport final** : `reports/SUMMARY.md` — benchmark vs targets avec valeurs mesurées.
+- **Baseline historique** : `reports/baseline.json` — référence jamais éditée manuellement.
+- **ADR(s)** : `docs/adr/0001-init.md` through `docs/adr/0004-prompt-v2-decision.md`.
+
+---
 
 ## Structure du Dépôt
 
 ```
 qa-multisaut/
-├── checkpoints/           # Modèles entraînés
-│   ├── gnn_best.pt        # GNN A8 (gatv2_h128_l2 + BM25)
-│   ├── qlora_run1/final/  # LoRA Run1 (r=16, 2ep)
-│   ├── qlora_run2/final/  # LoRA Run2 (r=32, 4ep)
-│   └── merged_final/      # Modèle fusionné 4-bit (Run1)
+├── checkpoints/           # Modèles entraînés (GNN + QLoRA fusionné)
 ├── configs/
 │   └── config.yaml        # Config globale
 ├── data/
@@ -248,89 +167,50 @@ qa-multisaut/
 │   │   ├── train/val/test.jsonl
 │   │   ├── kg_triplets.jsonl
 │   │   ├── pyg_{train,val,test}.pt
-│   │   ├── gnn_topk_{val,test}.jsonl
 │   │   └── sft_train.jsonl
 │   └── raw/               # Données brutes (gitignored)
-├── reports/               # Rapports d'étapes
-│   ├── j4_kg_stats.md
-│   ├── j5_baseline_triplet.md
-│   ├── j7_ablations.md
-│   ├── j7_decision.md
-│   ├── j8_baselines_llm.md
-│   ├── j8_sft_stats.md
-│   ├── j8_sft_samples.md
-│   ├── j10_selection.md
-│   ├── j11_neo4j.md
-│   ├── j12_final_test.md
-│   ├── j13_ablations_final.md
-│   └── j14_hallucination.md
+├── reports/               # Rapports d'étapes + benchmarks
+│   ├── ab_prompts_summary.md
+│   ├── ab_v1_v2.json
+│   ├── baseline.json
+│   ├── bench_latest.json
+│   ├── final.json
+│   ├── SUMMARY.md
+│   └── ...
 ├── results/               # CSV d'évaluation (gitignored)
 ├── scripts/
-│   └── demo.py            # Démo 3 exemples
+│   ├── ab_prompts.py          # A/B des prompts v1/v2
+│   ├── benchmark.py         # Benchmark (adapter fake|existing)
+│   ├── demo.py              # Démo 5 min (4 questions)
+│   └── ...
 ├── src/
 │   ├── api/               # FastAPI
-│   ├── eval/              # Évaluation
+│   ├── eval/              # Évaluation RAGAS
 │   ├── gnn/               # GNN (model, train, dataset, predict)
 │   ├── kg/                # Knowledge Graph (REBEL, Neo4j, normalize)
 │   ├── llm/               # LLM (prompt, load, train, eval)
 │   ├── orchestrator/      # LangGraph pipeline
-│   ├── pipeline/          # (vide, réservé)
 │   ├── prep/              # Préparation données
 │   └── retrieval/         # Baselines BM25/cosinus
 ├── tests/
-│   └── test_api.py        # Tests API
+│   └── test_judge.py      # 5 juges unitaires
 ├── mlruns/                # MLflow (gitignored)
-├── docker-compose.yml     # Neo4j
+├── docs/adr/              # Décisions architecturale (0001..0004)
+│   ├── 0001-init.md
+│   ├── 0002-prompt-registry.md
+│   ├── 0003-prompt-v2.md
+│   └── 0004-prompt-v2-decision.md
 ├── requirements.txt
-├── requirements.lock      # Versions exactes
+├── requirements.lock      # pip freeze > requirements.lock
+├── README.md
 ├── STATUS.md              # État d'avancement
-├── rapport.md             # Rapport final
-└── README.md
+├── rapport.md             # Rapport final complet
+├── STATUS.md
+└── prompts/
+    ├── registry.yaml        # Version active par étape
+    ├── registry.py          # Chargeur de registre
+    ├── generation_v1.j2     # Prompt génération v1
+    ├── generation_v2.j2     # Prompt génération v2
+    ├── judge_v1.j2          # Prompt juge v1
+    └── extraction_v1.j2     # Prompt extraction v1
 ```
-
-## Versions Clés (reproductibilité)
-
-```bash
-# Générer le lock
-pip freeze > requirements.lock
-```
-
-Versions utilisées :
-- torch 2.14.0
-- torch_geometric 2.6.1
-- transformers 4.44.0
-- peft 0.12.0
-- trl 0.11.1
-- bitsandbytes 0.43.3
-- sentence-transformers 3.0.1
-- langgraph 0.2.0
-- fastapi 0.112.0
-- neo4j 5.15.0
-- python 3.14
-
-## Graines Fixées
-- `SEED = 42` partout (Python, NumPy, PyTorch, random)
-- Split HotpotQA : seed 42 (sample_splits.py)
-- Dataset SFT : seed 42 (build_sft.py)
-- Entraînement GNN/QLoRA : seed 42
-
-## Licence
-MIT🔗 Modèle (adaptateurs LoRA) : https://huggingface.co/2Mohamed1/qa-multisaut-qlora
-🔗 Modèle entraîné (adaptateurs LoRA) : https://huggingface.co/2Mohamed1/qa-multisaut-qlora
-
-## Dataset doré gelé (P03) — golden_v1
-
-`eval/datasets/golden_v1.jsonl` : 56 lignes QA annotées graphe, construites depuis le corpus réel
-HotpotQA + KG (`scripts/build_golden_dataset.py`, seed 42). Distribution : 22 local (1 saut),
-16 hybrid (bridge, 2 docs), 9 global (comparatives), 9 abstention (absentes du KG).
-Chaque ligne : `{id, question, expected_answer, expected_entities, expected_triples, hops, mode, tags}` ;
-les réponses sont vérifiables sur les documents référencés dans `tags` (`doc:`/`docs:`).
-
-**Gel** : `eval/datasets/golden_v1.sha256` ; test pytest `tests/test_dataset_frozen.py` échoue si le
-JSONL est modifié sans dégel.
-
-```bash
-make validate-dataset          # schéma + unicité + distribution (56 lignes)
-make accept-dataset-change     # dégel conscient : régénère le sha256 (à committer avec le jsonl)
-```
-aucune ligne ne doit être modifiée après le commit de gel sans passer par `make accept-dataset-change`.

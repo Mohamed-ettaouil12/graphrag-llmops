@@ -22,12 +22,12 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
 
 import torch
-from src.llm.prompt import build_prompt_from_triplets
-from src.llm.load_llm import load_base_model, load_qlora_model, generate_answer
+
 from src.eval.metrics import exact_match, f1
+from src.llm.load_llm import generate_answer, load_base_model, load_qlora_model
+from src.llm.prompt import build_prompt_from_triplets
 
 CONFIGS = {
     "C1": {"model_type": "base", "context": "none"},
@@ -45,12 +45,12 @@ SEED = 42
 torch.manual_seed(SEED)
 
 
-def load_split(split: str) -> List[Dict]:
+def load_split(split: str) -> list[dict]:
     with open(f"data/processed/{split}.jsonl") as f:
         return [json.loads(line) for line in f]
 
 
-def load_triplets_by_qid() -> Dict[str, List[Dict]]:
+def load_triplets_by_qid() -> dict[str, list[dict]]:
     from collections import defaultdict
     by_qid = defaultdict(list)
     with open("data/processed/kg_triplets.jsonl") as f:
@@ -60,7 +60,7 @@ def load_triplets_by_qid() -> Dict[str, List[Dict]]:
     return by_qid
 
 
-def load_cos_topk(split: str) -> Dict[str, List[int]]:
+def load_cos_topk(split: str) -> dict[str, list[int]]:
     result = {}
     path = f"data/processed/cos_topk_{split}.jsonl"
     if not os.path.exists(path):
@@ -72,7 +72,7 @@ def load_cos_topk(split: str) -> Dict[str, List[int]]:
     return result
 
 
-def load_gnn_topk(split: str) -> Dict[str, List[Dict]]:
+def load_gnn_topk(split: str) -> dict[str, list[dict]]:
     result = {}
     path = f"data/processed/gnn_topk_{split}.jsonl"
     if not os.path.exists(path):
@@ -84,7 +84,7 @@ def load_gnn_topk(split: str) -> Dict[str, List[Dict]]:
     return result
 
 
-def parse_sources(response: str) -> Tuple[str, List[int]]:
+def parse_sources(response: str) -> tuple[str, list[int]]:
     """Parse la réponse pour extraire answer et sources."""
     if "Sources:" in response:
         parts = response.split("Sources:")
@@ -100,11 +100,11 @@ def parse_sources(response: str) -> Tuple[str, List[int]]:
 
 def get_context_triplets(
     qid: str,
-    qid_to_triplets: Dict[str, List[Dict]],
-    cos_topk: Dict[str, List[int]],
-    gnn_topk: Dict[str, List[Dict]],
+    qid_to_triplets: dict[str, list[dict]],
+    cos_topk: dict[str, list[int]],
+    gnn_topk: dict[str, list[dict]],
     context_type: str,
-) -> List[Dict]:
+) -> list[dict]:
     """Retourne les triplets de contexte selon le type."""
     triplets = qid_to_triplets.get(qid, [])
 
@@ -123,11 +123,11 @@ def evaluate(
     config: str,
     model,
     tokenizer,
-    split_data: List[Dict],
-    qid_to_triplets: Dict[str, List[Dict]],
-    cos_topk: Dict[str, List[int]],
-    gnn_topk: Dict[str, List[Dict]],
-) -> List[Dict]:
+    split_data: list[dict],
+    qid_to_triplets: dict[str, list[dict]],
+    cos_topk: dict[str, list[int]],
+    gnn_topk: dict[str, list[dict]],
+) -> list[dict]:
     """Évalue une configuration sur un split."""
     context_type = CONFIGS[config]["context"]
     results = []
@@ -136,10 +136,6 @@ def evaluate(
         qid = ex["id"]
         question = ex["question"]
         gold = ex["answer"]
-
-        triplets = qid_to_triplets.get(qid, [])
-        pos_indices = [i for i, t in enumerate(triplets) if t.get("label", 0) == 1]
-        has_pos = len(pos_indices) > 0
 
         context_triplets = get_context_triplets(
             qid, qid_to_triplets, cos_topk, gnn_topk, context_type
