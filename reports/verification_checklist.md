@@ -119,3 +119,35 @@ Verified via `make check-env` (scripts/check_env.py). Four groups:
 
 **Global test result**: 61/64 passed (2 xfailed). Coverage 38.26% — gate not met. 1 pre-existing test failure unrelated to LLM ops changes.
 
+
+## Evaluation
+
+**Dataset freeze**: ✅ PASS
+- `eval/datasets/golden_v1.sha256` matches `eval/datasets/golden_v1.jsonl`: `01dff8f508792d22b2e486992562a8814d030696367f8889961f74fff748bca6`
+- Dataset has 56 rows (>= 50 promised), with distribution: 1-hop (22), 2-hop (34), modes: local (22), hybrid (25), global (9), abstention (9 rows with abstention tag)
+
+**`make eval` end-to-end**: ⚠️ PARTIAL — cannot complete without GPU + Neo4j + `MISTRAL_API_KEY`
+- `make eval` requires GPU + Neo4j + checkpoints (per README). The collect step works with `--adapter fake`, but the judge step requires `langfuse` package and `MISTRAL_API_KEY`.
+- With `--no-judge` flag, `make eval-smoke` can collect rows but RAGAS metrics are skipped (aggregates empty `{}`).
+- The `_meta` block in `eval_latest.json` is complete: `git_sha`, `dataset_hash`, `seed`, `adapter`, `generation_model`, `judge`, `models`, `prompt_versions` all present.
+
+**Second run reproducibility**: ⚠️ CANNOT VERIFY — `make eval` cannot complete end-to-end due to missing GPU/Neo4j/keys. The collect step is deterministic with `--adapter fake` (same rows, same latencies, same contexts), but the judge step cannot be run to compare aggregates.
+
+**Non-regression comparison vs baseline.json**: ⚠️ CANNOT COMPARE — metric sets differ
+- `reports/baseline.json` (benchmark, from `make bench`): `p50_latency_ms`, `p95_latency_ms`, `avg_tokens_in`, `avg_tokens_out`, `avg_cost_per_request_usd`, `error_rate_pct`, `entity_recall: 0.0426`
+- `reports/eval_latest.json` (RAGAS eval, with `--no-judge`): 4 RAGAS metrics all `null` (`faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`), `aggregates: {}`, 3 graph metrics not computed
+- The benchmark baseline was established with `scripts/bench.py --adapter fake` (no LLM calls). The RAGAS eval requires LLM judge calls. Direct metric comparison is not meaningful without a common metric set.
+
+**Key metrics state** (from best-available data):
+
+| Metric | Baseline (bench) | Eval Latest | Δ | Within 5%? |
+|--------|-----------------|-------------|---|------------|
+| `entity_recall` | 0.0426 | N/A (RAGAS null) | N/A | N/A |
+| `faithfulness` | N/A | null | N/A | N/A |
+| `p95_latency_ms` | 0.0 | N/A | N/A | N/A |
+| `avg_cost_per_request_usd` | 0.0 | N/A | N/A | N/A |
+
+**Overall evaluation result**: Data incomplete for full non-regression assessment. Dataset freeze verified. `make eval` cannot run end-to-end without GPU + Neo4j + `MISTRAL_API_KEY`. Comparison table pending a fully-run evaluation cycle.
+
+**Constraints respected**: Baseline `reports/baseline.json` was NOT edited manually; it remains the historical reference from `make bench`. No retuning or silent adjustments were performed.
+
