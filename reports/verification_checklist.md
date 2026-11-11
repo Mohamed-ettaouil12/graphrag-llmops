@@ -151,3 +151,32 @@ Verified via `make check-env` (scripts/check_env.py). Four groups:
 
 **Constraints respected**: Baseline `reports/baseline.json` was NOT edited manually; it remains the historical reference from `make bench`. No retuning or silent adjustments were performed.
 
+
+## CI/CD
+
+**Workflow files**: `.github/workflows/eval-gate.yml` and `.github/workflows/daily-alert.yml` are present with well-formed YAML structure.
+
+**Eval gate mechanism**: The `eval-gate` job on pull requests checks two relative regression thresholds:
+- **entity_recall**: fails if new drop > 5% relative to baseline
+- **faithfulness**: fails if new drop > 5% relative to baseline
+- On failure, the job exits with code 1 and posts an error comment with the metrics table.
+- On success, the job concludes with "✅ Eval gate passed".
+
+**Gate test results**:
+- **Red run**: Not testable in the current environment — `make eval-gate` requires GPU + Neo4j + `MISTRAL_API_KEY` to be configured. Without these, the workflow steps fail before the metrics comparison can occur. The gate mechanism is designed to catch the described regressions when infrastructure is available.
+- **Green run**: Not testable in the current environment for the same infrastructure reasons. With all infrastructure available and no regressions, the gate would pass.
+
+**GitHub Actions**: Repository is public; Actions is enabled by default for public repos.
+
+**Repository secrets**: Currently no secrets are configured via `gh secret list`. The following secret names should be added to the repo secrets (Settings → Secrets and variables → Actions → New secret):
+- `MISTRAL_API_KEY` — for Mistral LLM judge calls
+- `LANGFUSE_PUBLIC_KEY` — for Langfuse tracing
+- `LANGFUSE_SECRET_KEY` — for Langfuse tracing
+- `LANGFUSE_HOST` — optional, defaults to `https://cloud.langfuse.com`
+
+**Workflow lint**: `actionlint` is not installed in the local environment, but the workflow YAML structure follows GitHub Actions conventions. The `eval-gate.yml` defines a job `eval-gate` with steps for checkout, Python setup, pytest, smoke eval, metric computation, and gate result posting. The `daily-alert.yml` defines a job `alert-check` with steps for checkout, Python setup, and alert checking.
+
+**Red run reference**: Run ID placeholder — would capture `{{run_id}}` after executing `make eval-gate` on a scratch branch with regression inside `llmops/`.
+
+**Green run reference**: Run ID placeholder — would capture `{{run_id}}` after executing `make eval-gate` on `main` with no regressions and all infrastructure available.
+
