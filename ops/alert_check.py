@@ -73,6 +73,7 @@ def _compute_aggregates(traces: list[dict]) -> dict[str, float]:
         return {
             "avg_faithfulness": 0.0,
             "p95_latency_ms": 0.0,
+            "p95_latency_s": 0.0,
             "error_rate_pct": 0.0,
             "daily_cost_usd": 0.0,
         }
