@@ -17,6 +17,10 @@ test:
 lint:
 	$(PY) -m ruff check llmops/ app/ eval/run_ragas.py tests/ --exclude tests/test_api.py scripts/build_golden_dataset.py scripts/validate_dataset.py
 
+# Vérification rapide de l'environnement (clés, .env, histoire git)
+check-env:
+	@$(PY) scripts/check_env.py
+
 # Évaluation pipeline legacy (GPU + checkpoints + data/processed requis)
 eval-legacy:
 	PYTHONPATH=. $(PY) -m src.eval.run_evaluation --config C5 --split val

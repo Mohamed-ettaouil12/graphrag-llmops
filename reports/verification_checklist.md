@@ -70,3 +70,17 @@ Global score: **18/22 PASS** (82%)
 - All ADRs (0001–0004) present with full non-trivial content
 - All prompt templates (v1/v2) present and non-trivial
 - Benchmark summary (SUMMARY.md) fully populated with MET/NOT MET assessments
+## Environment
+
+Verified via `make check-env` (scripts/check_env.py). Four groups:
+
+| Group | Check | Status | Evidence |
+|-------|-------|--------|----------|
+| **.env present** | `.env` exists + defines `MISTRAL_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | PASS/FAIL | `.env` present with all required keys |
+| **.env git-ignored** | `.env` is git-ignored (`.gitignore` contains `.env`) | PASS/FAIL | `.gitignore` includes `.env` |
+| **Mistral key** | ONE call to `mistral/mistral-small-latest` ("ping") succeeds; prints model + token usage, never the key | PASS/FAIL | LiteLLM response: model name + token counts (0 secret chars) |
+| **Langfuse keys** | Ingest one test trace → fetch via Langfuse API → assert visible | PASS/FAIL | Langfuse trace visible in UI after write + read |
+| **Git history scan** | `git log -p` scanned for API key patterns; FAIL if any matches found | PASS/FAIL | Count of redaction-matched lines; zero secret values printed |
+
+**Global env result**: PASS only if all four groups pass. Current status depends on `.env` configuration and API key validity.
+
