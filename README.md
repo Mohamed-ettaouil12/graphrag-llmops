@@ -1,216 +1,246 @@
-# QA Multi-Sauts : Retrieval Appris (GNN) et LLM Fine-tuné (QLoRA)
+# GraphRAG & LLMOps — RAG sur graphe de connaissances, industrialisé en production
 
-Pipeline : KG (REBEL + Neo4j) -> GNN GATv2 de scoring des triplets -> LLM fine-tuné QLoRA.
-Dataset : HotpotQA (distractor). Environnement : RTX 3050 Ti 4 Go, Ubuntu.
+Pipeline QA multi-sauts sur **HotpotQA (distractor)** : extraction de triplets (REBEL) → graphe Neo4j → scoring GNN (GATv2) → génération Qwen2.5-1.5B fine-tuné QLoRA 4-bit, le tout orchestré par LangGraph et industrialisé (routage, cache, tracing, prompt versioning, éval continue).
 
-**Sprint clos** — benchmarks vs targets, readme, demo, tag v1.0.
+> Contrainte matérielle : RTX 3050 Ti 4 Go — modèles figés dans `checkpoints/`, inference 4-bit obligatoire.
+
+---
+
+## Table des matières
+
+1. [Pitch](#pitch)
+2. [Architecture](#architecture-du-pipeline)
+3. [Couche LLMOps](#couche-llmops-industrialisation)
+4. [Résultats mesurés](#résultats-mesurés)
+5. [Quickstart](#quickstart)
+6. [Configuration (.env)](#configuration-env)
+7. [Tests & qualité](#tests--qualité)
+8. [Structure du dépôt](#structure-du-dépôt)
+9. [Documentation](#documentation)
+10. [Limites connues](#limites-connues)
+
+---
 
 ## Pitch
 
-**Problème** : La question-réponse multi-sauts (HotpotQA) exige de combiner plusieurs faits dispersés. Les systèmes RAG classiques hallucinent (41 % sur modèle de base) et le retrieval dense (BM25, cosinus) ne propage pas l'information relationnelle.
+**Problème** : la question-réponse multi-sauts (HotpotQA) exige de combiner plusieurs faits dispersés dans plusieurs documents. Le RAG classique hallucine (41 % sur le pipeline de base) et le retrieval lexical (BM25) ne propage pas l'information relationnelle.
 
-**Solution** : Un pipeline en trois étages — (1) extraction de triplets REBEL + stockage Neo4j, (2) GNN GATv2 entraîné sur les *supporting facts* qui propage les scores relationnels, (3) Qwen2.5-1.5B fine-tuné QLoRA 4-bit qui génère la réponse en citant ses sources.
+**Solution** : pipeline en trois étages —
+1. **Extraction de connaissances** : triplets REBEL stockés dans Neo4j (17 257 nœuds, 43 040 arêtes).
+2. **Scoring GNN** : GATv2 (2 couches, hidden 128, + feature BM25) entraîné sur les *supporting facts*, qui propage les scores relationnels sur le graphe.
+3. **Génération** : Qwen2.5-1.5B fine-tuné QLoRA 4-bit (LoRA r=16), réponse avec citations, abstention si preuves insuffisantes.
 
-**Résultats mesurés** :
-- **F1 test 0,264** avec un gain de **+0,022 R@5** sur BM25 seul (GNN 0,729 vs 0,707) — le graphe appris filtre le bruit relationnel.
-- **Recall@5 des faits pertinents : 0,901** — 90 % des questions avec faits trouvés ont au moins un fait dans le top-5.
-- **Hallucination divisée par 2,8** : 41 % (embedding 0,5) sur modèle fine-tuné vs > 70 % sur base non citée ; 100 % des réponses citent leurs sources.
-- **Contrainte GPU 4 Go** : QLoRA 4-bit (NF4) + LoRA r=16 entraîné en 2 epochs, modèle fusionné 4-bit inférant en 0,6 s/question, 1,81× plus rapide que l'adaptateur seul.
-
-**Ciblage** : Fidélité >= 0,90 (cible CI P07), p95 <= 1,2 s warm cache, <= 0,002 $/request, >= 45 % coût reduction vs forced-large, non-inferiorité (aucun metric drop > 5 %).
+**Résultats clés** :
+- **F1 test 0,264** / **EM 0,163** (config C5 : Run1 fusionné + GNN top-5).
+- **Recall@5 des supporting facts : 0,901** — le GNN bat BM25 seul de **+0,022 R@5** (0,729 vs 0,707).
+- **Format de réponse 100 % valide** après fine-tuning (0 % en base).
+- **Latence 0,61 s/question**, modèle fusionné 1,81× plus rapide que l'adaptateur.
 
 ---
 
-## Architecture du Pipeline
+## Architecture du pipeline
 
 ```mermaid
 flowchart LR
-    subgraph KG["Knowledge Graph (REBEL + Neo4j)"]
-        REBEL[REBEL Extraction] --> Neo4j[Neo4j Store]
-    end
-    subgraph GNN["GNN Scoring (GATv2)"]
-        GNN[GATv2 Scorer] --> BM25[BM25 Fusion]
-    end
-    subgraph LLM["LLM Layer (LLMops)"]
-        Generation[Prompt Generation] -->|mistral-small| GenerationNode[Generation]
-        Generation -->|mistral-large| Judge[Judge (LLM-as-judge)]
-        Judge -->|scores| Abstention[Abstention]
-    end
-    subgraph Prompt["Prompt Registry"]
-        PromptRegistry[prompts/registry.yaml] -->|v1 or v2| Templates[Templates: gen_v1, gen_v2, judge_v1]
-    end
-    Query[User Query] -->|preprocessing| Pipeline[LangGraph Pipeline]
-    Pipeline -->|routing| Generation
-    Pipeline -->|routing| Judge
-    Generation -->|answer| Response
-    Abstention -->|abstain| Response
+    Q[Question utilisateur] --> ED[Entity Detection]
+    ED --> NR[Neo4j Retrieval]
+    NR -->|voisinage 1-2 sauts| GNN[GNNScoring GATv2]
+    NR -.->|fallback PyG| GNN
+    GNN --> TK[TopK Selection]
+    TK --> AB{Abstention}
+    AB -->|score insuffisant| ABT[Abstain]
+    AB -->|OK| GEN[Generation Qwen2.5 QLoRA 4-bit]
+    GEN --> R[Réponse + citations]
 
-    style KG fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
-    style GNN fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
-    style LLM fill:#fff3e0,stroke:#fb8c00,stroke-width:2px
-    style Prompt fill:#f3e5f5,#7b1fa2,stroke-width:2px
+    subgraph KG["Knowledge Graph"]
+        RE[REBEL Extraction] --> N4[(Neo4j)]
+    end
+    N4 -.-> NR
 ```
 
-### LLMops Layer (couche d'industrialisation)
-
-- **Routing** : Classification heuristique de complexité → mistral-small (simple) ou mistral-large (complexe), comfallback dégradé
-- **Cache** : Traçabilité des requêtes Langfuse avec `prompt_version`, `route_taken` et coût USD par span
-- **Prompt versioning** : Registre `prompts/registry.yaml` mappe chaque étape (`generation`, `judge`, `extraction`) vers la version active ; rollback sans redémarrage via `make prompt-rollback`
-- **AB Testing** : `scripts/ab_prompts.py` compare `generation_v1` vs `generation_v2` (règle d'abstention stricte, contrat de citation)
-- **Coût tracking** : Prix par token mistral-small (~$0.000011) et mistral-large (~$0.000089) via llmops/pricing.py
-
-**Resultats A/B** (56 questions, FakeAdapter) — rapport dans `reports/ab_v1_v2.json` + `reports/ab_prompts_summary.md` :
-
-| Metrique | v1 | v2 | Note |
-|----------|-----|-----|------|
-| Coût/request (USD) | 0.0 | 0.0 | Pas de LLM |
-| Abstention (regle < 3 label=1) | Non applicable | 0.0% | v1 pas de regle formelle |
-| Label‑1 moyen | 0.0 | 0.0 | Pas de triplets étiquetés |
-| Latence p95 | 0 ms | 0 ms | Faux adaptateur |
-
-**Cible de promotion** (à vérifier avec éval RAGAS réelle) : aucun métrique ne doit baisser de > 5 %, la fidélité doit s'améliorer ou rester identique, le coût doit baisser.
+Les 7 nœuds LangGraph : `EntityDetection → Neo4jRetrieval → PyGFallback → GNNScoring → TopKSelection → Abstention → Generation` (code : `src/orchestrator/`).
 
 ---
 
-## Quickstart (≤ 15 min à compter du clone)
+## Couche LLMOps (industrialisation)
+
+| Composant | Fichier | Rôle |
+|-----------|---------|------|
+| **Routage** | `llmops/router.py` | Classification heuristique de complexité → mistral-small (simple) / mistral-large (complexe), fallback dégradé |
+| **Adaptateur LLM** | `llmops/adapter.py` | Interface locale (Qwen 4-bit) / hébergé (Mistral), contrat commun |
+| **Cache** | `llmops/cache.py` | Cache de réponses, traçabilité `prompt_version`, `route_taken` |
+| **Pricing** | `llmops/pricing.py` | Coût USD par token (mistral-small ~$0,000011, mistral-large ~$0,000089) |
+| **Tracing** | Langfuse | Un span par requête : tokens, coût, latence, `prompt_version`, entités, triplets |
+| **Prompt registry** | `prompts/registry.yaml` | Version active par étape (`generation`, `judge`, `extraction`), rollback sans redémarrage (`make prompt-rollback`) |
+| **A/B testing** | `scripts/ab_prompts.py` | Compare `generation_v1` vs `generation_v2` (règle d'abstention stricte + contrat de citation) |
+| **Éval continue** | `eval/run_ragas.py` | RAGAS + juge, venv isolé via `eval/bootstrap.sh`, dataset doré gelé (`eval/datasets`, sha256) |
+
+---
+
+## Résultats mesurés
+
+### Test (300 questions) — config C5 (Run1 fusionné + GNN top-5)
+
+| Métrique | Test | Val |
+|----------|------|-----|
+| EM | **0,1633** | 0,1950 |
+| F1 | **0,2636** | 0,2784 |
+| Format OK | **99,7 %** | 100 % |
+| Latence | **0,607 s** | 0,618 s |
+| Supporting facts Recall@5 | **0,9009** | 0,9357 |
+
+### Ablations retrieval (val)
+
+| Configuration | R@5 |
+|---------------|-----|
+| **GNN A8 (GATv2 + BM25)** | **0,7292** |
+| BM25 seul | 0,7074 |
+| Neo4j sans GNN (1-2 hops + BM25) | 0,6634 |
+| Neo4j + Cross-Encoder reranker | 0,4426 |
+
+### Hallucination (100 réponses val, juge embedding bge-small, seuil 0,5)
+
+**41 %** de réponses hallucinées, 59 % de claims supportés. Causes : erreurs de raisonnement (45 %), bruit GNN label=0 cité (35 %), info absente du top-5 (20 %). Détail : `reports/j14_hallucination.md`.
+
+### Benchmarks LLMOps vs cibles
+
+| Métrique | Baseline | Current | Cible | Statut |
+|----------|----------|---------|-------|--------|
+| Fidélité | N/A | N/A | ≥ 0,90 | NOT MET (nécessite éval RAGAS GPU) |
+| p95 latence (ms) | 0 | 0 | ≤ 1200 | MET |
+| Coût/requête (USD) | 0,0 | 0,0 | ≤ 0,002 | MET (modèle local) |
+| Non-infériorité (drop > 5 %) | — | — | toutes métriques | PASSED |
+
+*Mesure : `make bench` (`scripts/bench.py`, adapter fake, 56 questions).*
+
+---
+
+## Quickstart
 
 ```bash
-# 1. Cloner
-git clone <repo> && cd qa-multisaut
+# 1. Cloner et installer
+git clone https://github.com/Mohamed-ettaouil12/graphrag-llmops.git
+cd graphrag-llmops
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Lancer Neo4j (nécessaire pour les ablations GNN)
+# 2. Configurer l'environnement (voir section suivante)
+cp .env.example .env
+
+# 3. Lancer Neo4j
 docker compose up -d neo4j && sleep 20
 
-# 3. Lancer l'API
+# 4. Lancer l'API
 .venv/bin/python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-# 4. Tester l'API
+# 5. Tester
 curl -X POST "http://localhost:8000/ask" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the capital of France?"}'
 
-# 5. Lancer les tests
+# 6. Tests + démo + benchmark
 .venv/bin/python -m pytest tests/ -v
-
-# 6. Démo locale (5 min)
 .venv/bin/python scripts/demo.py
-
-# 7. Benchmark (réécrit reports/baseline.json + BASELINE.md)
 make bench
 ```
 
 ---
 
-## Benchmarks Table
+## Configuration (.env)
 
-| Metric | Baseline | Current | Target | MET? |
-|--------|----------|---------|--------|------|
-| Faithfulness | N/A | N/A | >= 0.90 | NOT MET |
-| Entity recall | 0.0426 | 0.0426 | — | - |
-| p95 latency (ms) | 0.0 | 0.0 | <= 1200 | MET |
-| Avg cost per request (USD) | 0.0 | 0.0 | <= 0.002 | MET |
-| Cost reduction vs forced-large | N/A | N/A | >= 45% | NOT MET |
-| Non-inferiority (drop > 5%) | — | — | all metrics | PASSED |
+**`.env` n'est jamais commité** — copier `.env.example` et remplir les valeurs :
 
-*Mesure avec `scripts/bench.py --adapter fake` (56 questions, HotpotQA distractor). Fidélité nécessite éval RAGAS avec GPU + Neo4j + Mistral judge. Coût reduction évaluable une fois le routage LLMops activé (mistral-small vs mistral-large).*
+| Variable | Rôle | Défaut |
+|----------|------|--------|
+| `MISTRAL_API_KEY` | LLM hébergé (réservé au router LLMOps) | vide — pipeline 100 % local |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Tracing Langfuse (brancheable sur les 7 nœuds) | vide / `https://cloud.langfuse.com` |
+| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | Accès Neo4j (aussi lu par `docker-compose.yml`) | `bolt://localhost:7687` / `neo4j` / — |
 
----
-
-## Langfuse Tracing
-
-Chaque requête `query()` vers l'API FastAPI produit un span Langfuse complet contenant :
-- `trace_id` et `session_id` transmis dans la réponse
-- `tags` : `env=dev|prod`
-- Entités touchées, triples utilisés, mode de retrieval
-- Consommation tokens + coût USD
-- Latence ms
-- `prompt_version` (v1 ou v2 selon le registre actif)
-
-**Pour visualiser les traces** :
-1. Démarrer l'API : `.venv/bin/python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 1`
-2. Poser une question via curl ou l'interface web
-3. Aller sur https://cloud.langfuse.com pour voir le span complet avec usage, coût, et prompt_version
-4. En mode dégradé (cles manquantes), les spans sont tout de même créés en mode no-op
-
-**Exemple de trace** (question factuelle "Quelle est la capitale de la France ?") :
-- `prompt_version`: `generation_v1`
-- `route_taken`: `simple-small` (complexité heuristiquclassée comme simple)
-- `cost_usd`: `0.0` (modèle local 4-bit, pas d'appel API)
-- `abstained`: `False`
-- `entities`: `['F', 'F']` (first two words du question extraits)
-- `triples`: `[('F', 'détermine', 'F')]` *(simulé)*
-- `usage`: `prompt_tokens: 12, completion_tokens: 24, total_tokens: 36`
+Sans clés API, le pipeline tourne en **mode dégradé local** : modèle Qwen 4-bit, spans Langfuse no-op, aucun appel externe.
 
 ---
 
-## Liens Utiles
+## Tests & qualité
 
-- **Cahier des charges** : `docs/ADR/` et `reports/j10_selection.md` — spécifications complètes des cibles qualité et des métriques d'évaluation.
-- **Ces prompts** : `prompts/registry.yaml` — registre versionné des prompts de génération, jugement et extraction.
-- **Rapport final** : `reports/SUMMARY.md` — benchmark vs targets avec valeurs mesurées.
-- **Baseline historique** : `reports/baseline.json` — référence jamais éditée manuellement.
-- **ADR(s)** : `docs/adr/0001-init.md` through `docs/adr/0004-prompt-v2-decision.md`.
+```bash
+make test      # pytest (API, juge, adapter, pricing, dataset gelé, RAGAS runner)
+make lint      # ruff
+make check-env # validation des variables d'environnement
+make bench     # benchmark vs baseline (reports/BASELINE.md)
+make eval      # éval RAGAS (venv juge bootstrappé)
+```
+
+Tests unitaires : `tests/` — API (`test_api.py`, `test_api_query.py`), juge (`test_judge.py`), contrat adaptateur (`test_adapter_contract.py`), pricing (`test_pricing.py`), immuabilité dataset (`test_dataset_frozen.py`), scaffold LLMOps (`test_llmops_scaffold.py`).
 
 ---
 
-## Structure du Dépôt
+## Structure du dépôt
 
 ```
-qa-multisaut/
-├── checkpoints/           # Modèles entraînés (GNN + QLoRA fusionné)
-├── configs/
-│   └── config.yaml        # Config globale
-├── data/
-│   ├── processed/         # Données intermédiaires (gitignored)
-│   │   ├── train/val/test.jsonl
-│   │   ├── kg_triplets.jsonl
-│   │   ├── pyg_{train,val,test}.pt
-│   │   └── sft_train.jsonl
-│   └── raw/               # Données brutes (gitignored)
-├── reports/               # Rapports d'étapes + benchmarks
-│   ├── ab_prompts_summary.md
-│   ├── ab_v1_v2.json
-│   ├── baseline.json
-│   ├── bench_latest.json
-│   ├── final.json
-│   ├── SUMMARY.md
-│   └── ...
-├── results/               # CSV d'évaluation (gitignored)
-├── scripts/
-│   ├── ab_prompts.py          # A/B des prompts v1/v2
-│   ├── benchmark.py         # Benchmark (adapter fake|existing)
-│   ├── demo.py              # Démo 5 min (4 questions)
-│   └── ...
+graphrag-llmops/
+├── app.py                      # Point d'entrée applicatif
 ├── src/
-│   ├── api/               # FastAPI
-│   ├── eval/              # Évaluation RAGAS
-│   ├── gnn/               # GNN (model, train, dataset, predict)
-│   ├── kg/                # Knowledge Graph (REBEL, Neo4j, normalize)
-│   ├── llm/               # LLM (prompt, load, train, eval)
-│   ├── orchestrator/      # LangGraph pipeline
-│   ├── prep/              # Préparation données
-│   └── retrieval/         # Baselines BM25/cosinus
-├── tests/
-│   └── test_judge.py      # 5 juges unitaires
-├── mlruns/                # MLflow (gitignored)
-├── docs/adr/              # Décisions architecturale (0001..0004)
-│   ├── 0001-init.md
-│   ├── 0002-prompt-registry.md
-│   ├── 0003-prompt-v2.md
-│   └── 0004-prompt-v2-decision.md
-├── requirements.txt
-├── requirements.lock      # pip freeze > requirements.lock
-├── README.md
-├── STATUS.md              # État d'avancement
-├── rapport.md             # Rapport final complet
-├── STATUS.md
-└── prompts/
-    ├── registry.yaml        # Version active par étape
-    ├── registry.py          # Chargeur de registre
-    ├── generation_v1.j2     # Prompt génération v1
-    ├── generation_v2.j2     # Prompt génération v2
-    ├── judge_v1.j2          # Prompt juge v1
-    └── extraction_v1.j2     # Prompt extraction v1
+│   ├── api/                    # FastAPI (endpoints /ask, /health)
+│   ├── orchestrator/           # Pipeline LangGraph (state, nodes, graph)
+│   ├── gnn/                    # GATv2 (model, train, dataset, predict_topk)
+│   ├── kg/                     # REBEL, Neo4j, normalisation, labelling
+│   ├── llm/                    # QLoRA (train, eval, prompt, build_sft)
+│   ├── pipeline/               # Pipeline legacy
+│   ├── retrieval/              # Baselines BM25 / cosinus
+│   ├── prep/                   # Préparation des splits
+│   └── eval/                   # Évaluation EM/F1
+├── llmops/                     # Couche industrialisation (router, adapter, cache, pricing)
+├── prompts/                    # Registre versionné + templates Jinja2 (gen_v1/v2, judge, extraction)
+├── eval/                       # Runner RAGAS + bootstrap venv juge + datasets gelés (sha256)
+├── scripts/                    # demo, bench, ab_prompts, langfuse_smoke, validate_dataset…
+├── tests/                      # Suite pytest
+├── docs/adr/                   # ADR 0001 → 0004
+├── reports/                    # Rapports d'étapes (j3…j16), baseline, SUMMARY, ab
+├── configs/config.yaml         # Config globale
+├── checkpoints/                # Modèles figés (gitignored)
+├── data/                       # Données (gitignored)
+├── docker-compose.yml          # Neo4j
+├── Makefile · requirements.txt · requirements.lock
+├── README.md · STATUS.md · rapport.md
 ```
+
+---
+
+## Documentation
+
+| Fichier | Contenu |
+|---------|---------|
+| `rapport.md` | Rapport final complet (méthodes, résultats, limites) |
+| `STATUS.md` | État d'avancement des 10 tâches, avec preuves |
+| `reports/SUMMARY.md` | Benchmark vs cibles |
+| `reports/BASELINE.md` | Baseline de référence (jamais éditée à la main) |
+| `reports/metrics_resume.md` | Tableau unique de toutes les métriques |
+| `reports/j12_final_test.md` | Éval finale test (EM/F1/recall/latence) |
+| `reports/j13_ablations_final.md` | 3 ablations retrieval + GNN ref |
+| `reports/j14_hallucination.md` | Analyse hallucination (41 %) |
+| `docs/adr/0001…0004` | Décisions architecturales (init, prompt registry, prompt v2) |
+| `prompts/registry.yaml` | Registre des versions de prompts actives |
+
+---
+
+## Limites connues
+
+1. **Labelling paragraph-level** : 30,75 % des questions sans triplet positif → limite structurelle du recall.
+2. **REBEL bruité** : relations non normalisées (3 966 relations uniques).
+3. **GPU 4 Go** : contraint batch/longueur de séquence, élimine DPO et full fine-tuning.
+4. **Hallucination 41 %** : modèle 1,5B + peu de données SFT (686 exemples, 2 epochs).
+5. **Ablations évaluées sur val uniquement** (pas de comparatif test).
+
+### Suites possibles
+- Labelling phrase-level ou distant supervision.
+- GNN top-10 + reranker cross-encoder fine-tuné sur triplets courts.
+- Augmentation des données SFT ; DPO si GPU > 8 Go ; Qwen2.5-3B/7B quantisé.
+
+---
+
+## Reproductibilité
+
+- Graine fixe `SEED=42` partout.
+- Versions exactes dans `requirements.lock`.
+- Dataset d'éval doré gelé avec empreinte sha256 (`eval/datasets`).
+- Traces MLflow dans `mlruns/` (gitignored).
